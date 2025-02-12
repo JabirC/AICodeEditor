@@ -1,4 +1,4 @@
-import { usePuter } from "./puter.js";
+import { IS_PUTER } from "./puter.js";
 
 const API_KEY = ""; // Get yours at https://platform.sulu.sh/apis/judge0
 
@@ -31,9 +31,10 @@ var fontSize = 13;
 
 var layout;
 
-export var sourceEditor;
+var sourceEditor;
 var stdinEditor;
 var stdoutEditor;
+var llmChat;
 
 var $selectLanguage;
 var $compilerOptions;
@@ -67,37 +68,33 @@ var layoutConfig = {
             type: "column",
             content: [{
                 type: "component",
-                height: 66,
-                componentName: "ai",
-                id: "ai",
-                title: "AI Assistant",
+                componentName: "stdin",
+                id: "stdin",
+                title: "Input",
                 isClosable: false,
                 componentState: {
                     readOnly: false
                 }
             }, {
-                type: "stack",
-                content: [
-                    {
-                        type: "component",
-                        componentName: "stdin",
-                        id: "stdin",
-                        title: "Input",
-                        isClosable: false,
-                        componentState: {
-                            readOnly: false
-                        }
-                    }, {
-                        type: "component",
-                        componentName: "stdout",
-                        id: "stdout",
-                        title: "Output",
-                        isClosable: false,
-                        componentState: {
-                            readOnly: true
-                        }
-                    }]
+                type: "component",
+                componentName: "stdout",
+                id: "stdout",
+                title: "Output",
+                isClosable: false,
+                componentState: {
+                    readOnly: true
+                }
             }]
+        }, {
+            type: "component",
+            // width: 66,
+            componentName: "chat",
+            id: "chat",
+            title: "Code Assistant",
+            isClosable: true,
+            componentState: {
+                readOnly: false
+            }
         }]
     }]
 };
@@ -139,7 +136,7 @@ function showHttpError(jqXHR) {
 
 function handleRunError(jqXHR) {
     showHttpError(jqXHR);
-    $runBtn.removeClass("loading");
+    $runBtn.removeClass("disabled");
 
     window.top.postMessage(JSON.parse(JSON.stringify({
         event: "runError",
@@ -163,7 +160,7 @@ function handleResult(data) {
 
     stdoutEditor.setValue(output);
 
-    $runBtn.removeClass("loading");
+    $runBtn.removeClass("disabled");
 
     window.top.postMessage(JSON.parse(JSON.stringify({
         event: "postExecution",
@@ -191,7 +188,7 @@ function run() {
         showError("Error", "Source code can't be empty!");
         return;
     } else {
-        $runBtn.addClass("loading");
+        $runBtn.addClass("disabled");
     }
 
     stdoutEditor.setValue("");
@@ -323,7 +320,7 @@ function saveFile(content, filename) {
 }
 
 async function openAction() {
-    if (usePuter()) {
+    if (IS_PUTER) {
         gPuterFile = await puter.ui.showOpenFilePicker();
         openFile(await (await gPuterFile.read()).text(), gPuterFile.name);
     } else {
@@ -332,7 +329,7 @@ async function openAction() {
 }
 
 async function saveAction() {
-    if (usePuter()) {
+    if (IS_PUTER) {
         if (gPuterFile) {
             gPuterFile.write(sourceEditor.getValue());
         } else {
@@ -348,6 +345,7 @@ function setFontSizeForAllEditors(fontSize) {
     sourceEditor.updateOptions({ fontSize: fontSize });
     stdinEditor.updateOptions({ fontSize: fontSize });
     stdoutEditor.updateOptions({ fontSize: fontSize });
+    llmChat.updateOptions({ fontSize: fontSize });
 }
 
 async function loadLangauges() {
@@ -477,7 +475,7 @@ function refreshLayoutSize() {
 
 window.addEventListener("resize", refreshLayoutSize);
 document.addEventListener("DOMContentLoaded", async function () {
-    $(".ui.selection.dropdown").dropdown();
+    $("#select-language").dropdown();
     $("[data-content]").popup({
         lastResort: "left center"
     });
@@ -521,37 +519,33 @@ document.addEventListener("DOMContentLoaded", async function () {
     $(document).on("keydown", "body", function (e) {
         if (e.metaKey || e.ctrlKey) {
             switch (e.key) {
-                case "Enter":
+                case "Enter": // Ctrl+Enter, Cmd+Enter
                     e.preventDefault();
                     run();
                     break;
-                case "s":
+                case "s": // Ctrl+S, Cmd+S
                     e.preventDefault();
-                    saveAction();
+                    save();
                     break;
-                case "o":
+                case "o": // Ctrl+O, Cmd+O
                     e.preventDefault();
-                    openAction();
+                    open();
                     break;
-                case "+":
-                case "=":
+                case "+": // Ctrl+Plus
+                case "=": // Some layouts use '=' for '+'
                     e.preventDefault();
                     fontSize += 1;
                     setFontSizeForAllEditors(fontSize);
                     break;
-                case "-":
+                case "-": // Ctrl+Minus
                     e.preventDefault();
                     fontSize -= 1;
                     setFontSizeForAllEditors(fontSize);
                     break;
-                case "0":
+                case "0": // Ctrl+0
                     e.preventDefault();
                     fontSize = 13;
                     setFontSizeForAllEditors(fontSize);
-                    break;
-                case "`":
-                    e.preventDefault();
-                    sourceEditor.focus();
                     break;
             }
         }
@@ -573,76 +567,6 @@ document.addEventListener("DOMContentLoaded", async function () {
             });
 
             sourceEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, run);
-
-            monaco.languages.registerInlineCompletionsProvider('*', {
-                provideInlineCompletions: async (model, position) => {
-                    if (!puter.auth.isSignedIn() || !document.getElementById("judge0-inline-suggestions").checked) {
-                        return;
-                    }
-
-                    const textBeforeCursor = model.getValueInRange({
-                        startLineNumber: 1,
-                        startColumn: 1,
-                        endLineNumber: position.lineNumber,
-                        endColumn: position.column
-                    });
-
-                    const textAfterCursor = model.getValueInRange({
-                        startLineNumber: position.lineNumber,
-                        startColumn: position.column,
-                        endLineNumber: model.getLineCount(),
-                        endColumn: model.getLineMaxColumn(model.getLineCount())
-                    });
-
-                    const aiResponse = await puter.ai.chat([{
-                        role: "user",
-                        content: `You are a code completion assistant. Given the following context, generate the most likely code completion.
-
-                    ### Code Before Cursor:
-                    ${textBeforeCursor}
-
-                    ### Code After Cursor:
-                    ${textAfterCursor}
-
-                    ### Instructions:
-                    - Predict the next logical code segment.
-                    - Ensure the suggestion is syntactically and contextually correct.
-                    - Keep the completion concise and relevant.
-                    - Do not repeat existing code.
-                    - Provide only the missing code.
-                    - **Respond with only the code, without markdown formatting.**
-                    - **Do not include triple backticks (\`\`\`) or additional explanations.**
-
-                    ### Completion:`.trim()
-                    }], {
-                        model: document.getElementById("judge0-chat-model-select").value,
-                    });
-
-                    let aiResponseValue = aiResponse?.toString().trim() || "";
-
-                    if (Array.isArray(aiResponseValue)) {
-                        aiResponseValue = aiResponseValue.map(v => v.text).join("\n").trim();
-                    }
-
-                    if (!aiResponseValue || aiResponseValue.length === 0) {
-                        return;
-                    }
-
-                    return {
-                        items: [{
-                            insertText: aiResponseValue,
-                            range: new monaco.Range(
-                                position.lineNumber,
-                                position.column,
-                                position.lineNumber,
-                                position.column
-                            )
-                        }]
-                    };
-                },
-                handleItemDidShow: () => { },
-                freeInlineCompletions: () => { }
-            });
         });
 
         layout.registerComponent("stdin", function (container, state) {
@@ -671,8 +595,66 @@ document.addEventListener("DOMContentLoaded", async function () {
             });
         });
 
-        layout.registerComponent("ai", function (container, state) {
-            container.getElement()[0].appendChild(document.getElementById("judge0-chat-container"));
+        layout.registerComponent("chat", function (container, state) {
+            // Create chatbox container
+            const chatContainer = document.createElement("div");
+            chatContainer.classList.add("flex", "flex-col", "h-full");
+            
+            // Create chat messages area
+            const chatMessages = document.createElement("div");
+            chatMessages.classList.add("flex-grow", "overflow-y-auto", "p-2");
+        
+            // Create input container
+            const inputContainer = document.createElement("div");
+            inputContainer.classList.add("flex", "p-2");
+        
+            // Create input field
+            const chatInput = document.createElement("input");
+            chatInput.type = "text";
+            chatInput.placeholder = "Type a message...";
+            chatInput.classList.add("flex-grow", "p-2", "border-none", "outline-none");
+        
+            // Create send button
+            const sendButton = document.createElement("button");
+            sendButton.textContent = "Send";
+            sendButton.classList.add("p-2", "ml-2", "border-none", "bg-blue-500", "text-white", "cursor-pointer", "outline-none");
+        
+            // Function to send messages
+            function sendMessage() {
+                if (chatInput.value.trim() !== "") {
+                    const messageBubble = document.createElement("div");
+                    messageBubble.textContent = chatInput.value;
+                    
+                    // Message Bubble Styles (Right-aligned)
+                    messageBubble.classList.add("m-1", "p-2", "bg-blue-500", "text-white", "rounded-lg", "max-w-[60%]", "self-end", "break-words");
+        
+                    chatMessages.appendChild(messageBubble);
+                    chatMessages.scrollTop = chatMessages.scrollHeight; // Auto-scroll to latest message
+                    chatInput.value = ""; // Clear input after sending message
+                }
+            }
+        
+            // Handle sending messages via Enter key
+            chatInput.addEventListener("keypress", function (event) {
+                if (event.key === "Enter") sendMessage();
+            });
+        
+            // Handle sending messages via Send button
+            sendButton.addEventListener("click", sendMessage);
+        
+            // Apply flexbox to messages container
+            chatMessages.classList.add("flex", "flex-col");
+        
+            // Append elements to input container
+            inputContainer.appendChild(chatInput);
+            inputContainer.appendChild(sendButton);
+        
+            // Append elements to chat container
+            chatContainer.appendChild(chatMessages);
+            chatContainer.appendChild(inputContainer);
+        
+            // Append chat container to the GoldenLayout container
+            container.getElement()[0].appendChild(chatContainer);
         });
 
         layout.on("initialised", function () {
@@ -697,7 +679,7 @@ document.addEventListener("DOMContentLoaded", async function () {
         e.innerText = `${superKey}${e.innerText}`;
     });
 
-    if (usePuter()) {
+    if (IS_PUTER) {
         puter.ui.onLaunchedWithItems(async function (items) {
             gPuterFile = items[0];
             openFile(await (await gPuterFile.read()).text(), gPuterFile.name);
